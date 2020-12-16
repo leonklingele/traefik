@@ -1,8 +1,10 @@
 package tls
 
 import (
+	"bytes"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"errors"
 	"io/ioutil"
@@ -19,9 +21,13 @@ var (
 	errCacheItemNotFound     = errors.New("cache item not found")
 )
 
+var oidExtensionAuthorityKeyID = asn1.ObjectIdentifier{2, 5, 29, 35}
+
 type crlManager struct {
 	cache     map[string]*crlCacheItem
 	cacheLock sync.RWMutex
+
+	localCRLs []*pkix.CertificateList
 }
 
 type crlCacheItem struct {
@@ -29,26 +35,89 @@ type crlCacheItem struct {
 }
 
 func (cm *crlManager) RevocationCheck(cert *x509.Certificate) (error, error) {
+	// Consult local CRLs first
+	softErr, hardErr := cm.checkLocal(cert)
+	if softErr != nil || hardErr != nil {
+		return softErr, hardErr
+	}
+
+	// Consult remote CRLs thereafter
+	return cm.checkRemote(cert)
+}
+
+func (cm *crlManager) checkLocal(cert *x509.Certificate) (error, error) {
+	issuer := certificateIssuer(cert)
+
+crlLoop:
+	for _, crl := range cm.localCRLs {
+		// Skip if CRL issuer mismatches certificate issuer
+		// TODO(leon): Fail-hard if issuer == nil?
+		if issuer != nil {
+			if err := issuer.CheckCRLSignature(crl); err != nil {
+				log.WithoutContext().Debugf("skipping local CRL due to issuer signature mismatch: %v", err)
+				continue crlLoop
+			}
+		}
+
+		// If the 'X509v3 Authority Key Identifier' is set, use it to verify if CRL comes from the CA which issued cert
+		var didCheckAuthorityKeyID bool
+		if cert.AuthorityKeyId != nil {
+			// Find raw authority key ID value
+			// TODO: Is this really required or always prefixed with 48 22 128 20?
+			var certAuthorityKeyID []byte
+			for _, e := range cert.Extensions {
+				if e.Id.Equal(oidExtensionAuthorityKeyID) {
+					certAuthorityKeyID = e.Value
+					break
+				}
+			}
+			for _, e := range crl.TBSCertList.Extensions {
+				if e.Id.Equal(oidExtensionAuthorityKeyID) {
+					didCheckAuthorityKeyID = true
+					if !bytes.Equal(certAuthorityKeyID, e.Value) {
+						log.WithoutContext().Debugf("skipping local CRL due to issuer authority key ID mismatch: %q != %q", certAuthorityKeyID, e.Value)
+						continue crlLoop
+					}
+					break
+				}
+			}
+		}
+
+		if !didCheckAuthorityKeyID {
+			// Fall back to silly issuer check
+			if crl.TBSCertList.Issuer.String() != cert.Issuer.ToRDNSequence().String() {
+				log.WithoutContext().Debugf("skipping local CRL due to issuer mismatch: %q != %q", crl.TBSCertList.Issuer.String(), cert.Issuer.ToRDNSequence().String())
+				continue crlLoop
+			}
+		}
+
+		softErr, hardErr := cm.revocationCheckAgainstCRL(crl, cert)
+		if softErr != nil || hardErr != nil {
+			return softErr, hardErr
+		}
+	}
+
+	return nil, nil
+}
+
+func (cm *crlManager) checkRemote(cert *x509.Certificate) (error, error) {
 	for _, url := range cert.CRLDistributionPoints {
 		// Skip unsupported URL protocols
 		if isLDAPURL(url) {
 			log.WithoutContext().Debugf("skipping LDAP CRL URL: %q", url)
 			continue
 		}
+
 		softErr, hardErr := cm.revocationCheckAgainstURL(url, cert)
 		if softErr != nil || hardErr != nil {
 			return softErr, hardErr
 		}
 	}
+
 	return nil, nil
 }
 
-func (cm *crlManager) revocationCheckAgainstURL(url string, cert *x509.Certificate) (error, error) {
-	crl, softErr, hardErr := cm.crlByURL(url)
-	if softErr != nil || hardErr != nil {
-		return softErr, hardErr
-	}
-
+func (cm *crlManager) revocationCheckAgainstCRL(crl *pkix.CertificateList, cert *x509.Certificate) (error, error) {
 	// Validate CRL certificate issuer signature
 	issuer := certificateIssuer(cert)
 	if issuer != nil {
@@ -64,6 +133,15 @@ func (cm *crlManager) revocationCheckAgainstURL(url string, cert *x509.Certifica
 	}
 
 	return nil, nil
+}
+
+func (cm *crlManager) revocationCheckAgainstURL(url string, cert *x509.Certificate) (error, error) {
+	crl, softErr, hardErr := cm.crlByURL(url)
+	if softErr != nil || hardErr != nil {
+		return softErr, hardErr
+	}
+
+	return cm.revocationCheckAgainstCRL(crl, cert)
 }
 
 func (cm *crlManager) crlByURL(url string) (*pkix.CertificateList, error, error) {
@@ -126,9 +204,11 @@ func (cm *crlManager) setCacheItem(key string, item *crlCacheItem) {
 	cm.cacheLock.Unlock()
 }
 
-func newCRLManager() *crlManager {
+func newCRLManager(localCRLs []*pkix.CertificateList) *crlManager {
 	return &crlManager{
 		cache: make(map[string]*crlCacheItem),
+
+		localCRLs: localCRLs,
 	}
 }
 

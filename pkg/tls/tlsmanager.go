@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
 	"fmt"
 	"sync"
@@ -193,8 +194,25 @@ func buildTLSConfig(tlsOption Options) (*tls.Config, error) {
 		conf.ClientCAs = pool
 		conf.ClientAuth = tls.RequireAndVerifyClientCert
 
+		// Load local CRLs
+		var localCRLs []*pkix.CertificateList
+		for _, crlFile := range tlsOption.ClientAuth.CRLFiles {
+			data, err := crlFile.Read()
+			if err != nil {
+				return nil, err
+			}
+			crl, err := x509.ParseCRL(data)
+			if err != nil {
+				if crlFile.IsPath() {
+					return nil, fmt.Errorf("invalid CRL(s) in %s: %w", crlFile, err)
+				}
+				return nil, fmt.Errorf("invalid CRL(s) content: %w", err)
+			}
+			localCRLs = append(localCRLs, crl)
+		}
+
 		// Set VerifyPeerCertificate func
-		crm := newCertificateRevocationManager()
+		crm := newCertificateRevocationManager(localCRLs)
 		conf.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 			// Quoting the Go docs:
 			//

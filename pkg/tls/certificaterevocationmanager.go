@@ -2,6 +2,7 @@ package tls
 
 import (
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
 	"time"
 )
@@ -37,8 +38,8 @@ func (crm *certificateRevocationManager) validateRevocation(cert *x509.Certifica
 	return crm.crlManager.RevocationCheck(cert)
 }
 
-func newCertificateRevocationManager() *certificateRevocationManager {
+func newCertificateRevocationManager(localCRLs []*pkix.CertificateList) *certificateRevocationManager {
 	return &certificateRevocationManager{
-		crlManager: newCRLManager(),
+		crlManager: newCRLManager(localCRLs),
 	}
 }
