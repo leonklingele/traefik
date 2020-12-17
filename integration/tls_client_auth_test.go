@@ -1,37 +1,24 @@
 package integration
 
 import (
-	"context"
 	"crypto/tls"
-	"errors"
-	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/go-check/check"
 	"github.com/traefik/traefik/v2/integration/try"
+	"github.com/traefik/traefik/v2/script/client-cert/simpleca"
 	checker "github.com/vdemeester/shakers"
 )
 
 const (
-	caRootCertPath = "./fixtures/tlsclientauth/ca/ca.pem"
-	caCRLPath      = "./fixtures/tlsclientauth/ca/ca.crl"
-
-	caCRLHTTPPort     = 8081      // as defined in the client certificates
-	caCRLHTTPEndpoint = "/ca.crl" // as defined in the client certificates
-
-	// client1 is signed and still valid
-	client1CertPath = "./fixtures/tlsclientauth/ca/client1.pem"
-	client1KeyPath  = "./fixtures/tlsclientauth/ca/client1.key"
-	// client2 is signed but was revoked by the CRL
-	client2CertPath = "./fixtures/tlsclientauth/ca/client2.pem"
-	client2KeyPath  = "./fixtures/tlsclientauth/ca/client2.key"
-
 	serverCertPath = "./fixtures/tlsclientauth/server/server.pem"
 	serverKeyPath  = "./fixtures/tlsclientauth/server/server.key"
+
+	ca1ID = 0
+	ca2ID = 1
 )
 
 const (
@@ -40,30 +27,37 @@ const (
 
 var errBadCertificateStr = "bad certificate"
 
-type TLSClientAuthSuite struct{ BaseSuite }
+type TLSClientAuthSuite struct {
+	BaseSuite
+
+	cas []*simpleca.CA
+}
 
 func (s *TLSClientAuthSuite) SetUpSuite(c *check.C) {
 	s.createComposeProject(c, "tlsclientauth")
 	s.composeProject.Start(c)
 
-	http.HandleFunc(caCRLHTTPEndpoint, func(res http.ResponseWriter, req *http.Request) {
-		http.ServeFile(res, req, caCRLPath)
-	})
-}
+	const writeFiles = false
+	cas, err := simpleca.BasicRun(writeFiles)
+	c.Assert(err, checker.IsNil)
+	s.cas = cas
 
-func (s *TLSClientAuthSuite) startCRLServer() func() error {
-	srv := &http.Server{Addr: fmt.Sprintf(":%d", caCRLHTTPPort)}
-	go func() {
-		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("CRL server failed: %v", err)
-		}
-	}()
-	return func() error {
-		return srv.Shutdown(context.Background())
+	for _, ca := range cas {
+		ca.RegisterHTTPHandlers()
 	}
 }
 
+func (s *TLSClientAuthSuite) startCRLServer() func() error {
+	// TODO: Should not wait for server to become available
+	defer time.Sleep(2 * time.Second)
+	return simpleca.ServeHTTP()
+}
+
 func (s *TLSClientAuthSuite) testrun(c *check.C, cfp string) (*http.Request, *http.Transport, *http.Transport, func()) {
+	return s.testrunWithCRLID(c, cfp, -1)
+}
+
+func (s *TLSClientAuthSuite) testrunWithCRLID(c *check.C, cfp string, caIDForCRL int) (*http.Request, *http.Transport, *http.Transport, func()) {
 	var cleanupFuncs []func() error
 	cleanupFunc := func() {
 		for _, cf := range cleanupFuncs {
@@ -72,12 +66,30 @@ func (s *TLSClientAuthSuite) testrun(c *check.C, cfp string) (*http.Request, *ht
 		}
 	}
 
-	caRootCertContent, err := ioutil.ReadFile(caRootCertPath)
+	ca1 := s.cas[ca1ID]
+	caRootCertContent := ca1.CertBytes()
+
+	var caCRLContent []byte
+	if caIDForCRL > -1 {
+		caCRLContent = s.cas[caIDForCRL].CRLBytes()
+	}
+	// Must provide CRL as file as its binary content.
+	caCRLFile, err := ioutil.TempFile("", "crl")
 	c.Assert(err, check.IsNil)
-	client1KeyPair, err := tls.LoadX509KeyPair(client1CertPath, client1KeyPath)
-	c.Assert(err, checker.IsNil)
-	client2KeyPair, err := tls.LoadX509KeyPair(client2CertPath, client2KeyPath)
-	c.Assert(err, checker.IsNil)
+	caCRLPath := caCRLFile.Name()
+	_, err = caCRLFile.Write(caCRLContent)
+	c.Assert(err, check.IsNil)
+	err = caCRLFile.Close()
+	c.Assert(err, check.IsNil)
+	cleanupFuncs = append(cleanupFuncs, func() error {
+		return os.Remove(caCRLPath)
+	})
+
+	client1KeyPair, err := tls.X509KeyPair(ca1.Client(0).CertBytes(), ca1.Client(0).PrivBytes())
+	c.Assert(err, check.IsNil)
+	client2KeyPair, err := tls.X509KeyPair(ca1.Client(1).CertBytes(), ca1.Client(1).PrivBytes())
+	c.Assert(err, check.IsNil)
+
 	serverCertContent, err := ioutil.ReadFile(serverCertPath)
 	c.Assert(err, check.IsNil)
 	serverKeyContent, err := ioutil.ReadFile(serverKeyPath)
@@ -85,10 +97,14 @@ func (s *TLSClientAuthSuite) testrun(c *check.C, cfp string) (*http.Request, *ht
 
 	file := s.adaptFile(c, cfp, struct {
 		CARootCertContent string
+		CACRLPath         string
+
 		ServerCertContent string
 		ServerKeyContent  string
 	}{
 		CARootCertContent: string(caRootCertContent),
+		CACRLPath:         caCRLPath,
+
 		ServerCertContent: string(serverCertContent),
 		ServerKeyContent:  string(serverKeyContent),
 	})
@@ -136,6 +152,7 @@ func (s *TLSClientAuthSuite) requestShouldSucceed(c *check.C, req *http.Request,
 
 func (s *TLSClientAuthSuite) requestShouldFail(c *check.C, req *http.Request, tr *http.Transport) {
 	err := try.RequestWithTransport(req, requestTimeout, tr)
+	c.Assert(err, checker.NotNil)
 	c.Assert(err.Error(), checker.Contains, errBadCertificateStr)
 }
 
@@ -143,9 +160,9 @@ func (s *TLSClientAuthSuite) TestTLSClientAuthCRL(c *check.C) {
 	req, trClient1, trClient2, cleanupFunc := s.testrun(c, "./fixtures/tlsclientauth/crl.toml")
 	defer cleanupFunc()
 
-	// Request with client1 should succeed (soft-fail due to missing CRL)
+	// Request with client1 should succeed (soft-fail due to missing remote CRL)
 	s.requestShouldSucceed(c, req, trClient1)
-	// Request with client2 should succeed (soft-fail due to missing CRL)
+	// Request with client2 should succeed (soft-fail due to missing remote CRL)
 	s.requestShouldSucceed(c, req, trClient2)
 
 	// Boot up CRL server
@@ -159,9 +176,9 @@ func (s *TLSClientAuthSuite) TestTLSClientAuthCRL(c *check.C) {
 	// Shut down CRL server
 	c.Assert(serverShutdownFunc(), checker.IsNil)
 
-	// Request with client1 should succeed (due to cached CRL)
+	// Request with client1 should succeed (due to cached remote CRL)
 	s.requestShouldSucceed(c, req, trClient1)
-	// Request with client2 should fail (due to cached CRL)
+	// Request with client2 should fail (due to cached remote CRL)
 	s.requestShouldFail(c, req, trClient2)
 }
 
@@ -169,9 +186,9 @@ func (s *TLSClientAuthSuite) TestTLSClientAuthCRLStrict(c *check.C) {
 	req, trClient1, trClient2, cleanupFunc := s.testrun(c, "./fixtures/tlsclientauth/crl_revocationCheckStrict.toml")
 	defer cleanupFunc()
 
-	// Request with client1 should fail (hard-fail due to missing CRL)
+	// Request with client1 should fail (hard-fail due to missing remote CRL)
 	s.requestShouldFail(c, req, trClient1)
-	// Request with client2 should fail (hard-fail due to missing CRL)
+	// Request with client2 should fail (hard-fail due to missing remote CRL)
 	s.requestShouldFail(c, req, trClient2)
 
 	// Boot up CRL server
@@ -185,8 +202,28 @@ func (s *TLSClientAuthSuite) TestTLSClientAuthCRLStrict(c *check.C) {
 	// Shut down CRL server
 	c.Assert(serverShutdownFunc(), checker.IsNil)
 
-	// Request with client1 should succeed (due to cached CRL)
+	// Request with client1 should succeed (due to cached remote CRL)
 	s.requestShouldSucceed(c, req, trClient1)
-	// Request with client2 should fail (due to cached CRL)
+	// Request with client2 should fail (due to cached remote CRL)
 	s.requestShouldFail(c, req, trClient2)
+}
+
+func (s *TLSClientAuthSuite) TestTLSClientAuthCRLWithCRLFiles(c *check.C) {
+	req, trClient1, trClient2, cleanupFunc := s.testrunWithCRLID(c, "./fixtures/tlsclientauth/crl_crlFiles.toml", ca1ID)
+	defer cleanupFunc()
+
+	// Request with client1 should succeed (soft-fail due to being unrevoked in local CRL and missing remote CRL)
+	s.requestShouldSucceed(c, req, trClient1)
+	// Request with client2 should fail (due to local CRL)
+	s.requestShouldFail(c, req, trClient2)
+}
+
+func (s *TLSClientAuthSuite) TestTLSClientAuthCRLWithCRLFilesDifferentCA(c *check.C) {
+	req, trClient1, trClient2, cleanupFunc := s.testrunWithCRLID(c, "./fixtures/tlsclientauth/crl_crlFiles.toml", ca2ID)
+	defer cleanupFunc()
+
+	// Request with client1 should succeed (soft-fail due to being unrevoked in local CRL and missing remote CRL)
+	s.requestShouldSucceed(c, req, trClient1)
+	// Request with client2 should succeed (soft-fail due to being unrevoked in local CRL and missing remote CRL)
+	s.requestShouldSucceed(c, req, trClient2)
 }
