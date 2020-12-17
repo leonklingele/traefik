@@ -435,8 +435,10 @@ func TestDo_dynamicConfiguration(t *testing.T) {
 				CipherSuites:     []string{"foo"},
 				CurvePreferences: []string{"foo"},
 				ClientAuth: traefiktls.ClientAuth{
-					CAFiles:        []traefiktls.FileOrContent{"ca.pem"},
-					ClientAuthType: "RequireAndVerifyClientCert",
+					CAFiles:               []traefiktls.FileOrContent{"ca.pem"},
+					ClientAuthType:        "RequireAndVerifyClientCert",
+					CRLFiles:              nil,
+					RevocationCheckStrict: true,
 				},
 				SniStrict:                true,
 				PreferServerCipherSuites: true,

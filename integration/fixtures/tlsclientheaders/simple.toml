@@ -28,6 +28,7 @@
   [tls.options.default.clientAuth]
     caFiles = [ """{{ .RootCertContent }}""" ]
     clientAuthType = "RequireAndVerifyClientCert"
+    crlFiles = []
     revocationCheckStrict = false
 
 [tls.stores]

@@ -451,6 +451,7 @@ tls:
         - foobar
         - foobar
         clientAuthType: foobar
+        crlFiles:
         revocationCheckStrict: true
       sniStrict: true
       preferServerCipherSuites: true
@@ -468,6 +469,7 @@ tls:
         - foobar
         - foobar
         clientAuthType: foobar
+        crlFiles:
         revocationCheckStrict: true
       sniStrict: true
       preferServerCipherSuites: true

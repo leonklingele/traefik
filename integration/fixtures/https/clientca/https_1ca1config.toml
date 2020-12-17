@@ -51,4 +51,5 @@
   [tls.options.default.clientAuth]
     caFiles = ["fixtures/https/clientca/ca1.crt"]
     clientAuthType = "VerifyClientCertIfGiven"
+    crlFiles = []
     revocationCheckStrict = false

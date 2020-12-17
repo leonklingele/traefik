@@ -415,7 +415,8 @@ The `clientAuth.clientAuthType` option governs the behaviour as follows:
 
 When client authentication is enforced — i.e. when `clientAuth.clientAuthType` is `VerifyClientCertIfGiven` (and the client really provides a certificate) or is `RequireAndVerifyClientCert` (see [here](https://golang.org/pkg/crypto/tls/#Config.VerifyPeerCertificate) for details) — the revocation status of the client certificate is checked. Currently only CRL checks are performed.
 If one or multiple CRL URL endpoints are configured in the client certificate, these CRLs are consulted (downloaded) and it is checked whether the certificate has been revoked (i.e. is referenced in a CRL).
-When retrieving a CRL fails, a soft-error occurs. By default, soft-errors are tolerated and the handshake completes without performing additional revocation checks (such as the CRL lookup). In case such a soft-error should be treated as a verification failure (i.e. when the connection should not be established without checking the client certificate's revocation status) set `clientAuth.revocationCheckStrict` to `true`.
+Local CRLs files or CRL content can be configured using the `clientAuth.crlFiles` configuration option.
+When retrieving a remote CRL fails, a soft-error occurs. By default, soft-errors are tolerated and the handshake completes without performing additional revocation checks (such as the CRL lookup). In case such a soft-error should be treated as a verification failure (i.e. when the connection should not be established without checking the client certificate's revocation status) set `clientAuth.revocationCheckStrict` to `true`.
 
 ```toml tab="File (TOML)"
 # Dynamic configuration
@@ -426,7 +427,8 @@ When retrieving a CRL fails, a soft-error occurs. By default, soft-errors are to
       # in PEM format. each file can contain multiple CAs.
       caFiles = ["tests/clientca1.crt", "tests/clientca2.crt"]
       clientAuthType = "RequireAndVerifyClientCert"
-      # revocationCheckStrict = true
+    # crlFiles: []
+    # revocationCheckStrict = true
 ```
 
 ```yaml tab="File (YAML)"
@@ -441,6 +443,7 @@ tls:
           - tests/clientca1.crt
           - tests/clientca2.crt
         clientAuthType: RequireAndVerifyClientCert
+        # crlFiles: []
         # revocationCheckStrict: true
 ```
 
@@ -457,5 +460,6 @@ spec:
     secretNames:
       - secretCA
     clientAuthType: RequireAndVerifyClientCert
+    # crlFiles: []
     # revocationCheckStrict: true
 ```
