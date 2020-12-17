@@ -1,6 +1,3 @@
-/ca.key
-/ca.pem
-/ca.crl
-
-/client*.key
-/client*.pem
+/ca*.key
+/ca*.pem
+/ca*.crl
